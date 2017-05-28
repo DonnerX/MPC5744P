@@ -1,0 +1,83 @@
+#include "derivative.h" /* include peripheral declarations */
+
+unsigned int data;
+void sys_config(void)
+{
+	MC_ME.RUN_PC[0].B.DRUN=1;//open all pheriphral clock in DRUN mode
+	MC_ME.DRUN_MC.B.SYSCLK=2;//use pll0 to SYSCLK
+
+	//config PLL0 200Mhz
+	MC_ME.DRUN_MC.B.XOSCON=1;//Open XOSC in DRUN mode
+	MC_CGM.AC3_SC.B.SELCTL=1;//select XOSC as source of pll0;
+	PLLDIG.PLL0DV.R = 0x50000000 |0x00020000 |0x00002000 |0x0014 ; //predefined PLL0 divider register
+	MC_ME.DRUN_MC.B.PLL0ON=1;//Enable pll0;
+
+	/*
+	//config ADC_CLK
+	MC_CGM.AC0_SC.B.SELCTL=2;//Select pll0 as ADC_clk source
+	MC_CGM.AC0_DC2.R=0x80010000;// ADC_CLK=PLL0/(1+1)
+	*/
+
+	//config DSPI_CLK
+	MC_CGM.SC_DC0.R=0x80030000;//set PBRIDGEx_CLK 50mhz
+
+	//enter DRUN
+	MC_ME.MCTL.R = 0x30005AF0;
+	MC_ME.MCTL.R = 0x3000A50F;
+
+	//wait until done
+	while(!MC_ME.GS.B.S_PLL0);  //ME_GS Wait for PLL stabilization.
+	while(MC_ME.GS.B.S_MTRANS);//Waiting for end of transaction
+	while(MC_ME.GS.B.S_CURRENT_MODE != 0x3);// ME_GS Check DRUN mode has successfully been entered
+}
+
+void SPI0_padconfig()
+{
+	//config DSPI0
+	//config CS0
+	SIUL2.MSCR[36].B.SSS = 1;                 //Config C[4] as CS0
+	SIUL2.MSCR[36].B.OBE = 1;                 //Enable output buffer
+	SIUL2.MSCR[36].B.SRC = 3;                 // Full strength slew rate
+
+	SIUL2.MSCR[37].B.SSS = 1;                //C[5] as SCK
+	SIUL2.MSCR[37].B.OBE = 1;                //Enable output buffer
+	SIUL2.MSCR[37].B.SRC = 3;                // Full strength slew rate
+
+	SIUL2.MSCR[38].B.SSS = 1;                 //C[6] as SOUT
+	SIUL2.MSCR[38].B.OBE = 1;                 //Enable output buffer
+	SIUL2.MSCR[38].B.SRC = 3;                 // Full strength slew rate
+
+	SIUL2.MSCR[39].B.IBE = 1;                //Enable input buffer of C[7]
+	SIUL2.IMCR[41].B.SSS = 1;            //C[7] as input pin SIN
+}
+
+void init_SPI0()
+{
+	SPI_0.MCR.R = 0x80010001;		//master mode, halt
+	SPI_0.MODE.CTAR[0].R = 0x78021004; //config baud rate
+	//DBR=0,FMSZ=1111,CPOL=0,CPHA=0,LSBFE=0,PCSSCK=00,PASC=00,PDT=00,PBR=10
+	//CSSCK=0001,ASC=0000,DT=0000,BR=0100
+	SPI_0.MCR.B.HALT = 0x0; //start spi0
+}
+
+void read_data_SPI_0(void)
+{
+  while (SPI_0.SR.B.RFDF != 1){}   //Wait for Receive FIFO Drain Flag = 1
+  data =SPI_0.POPR.R;              //Read  received data
+  SPI_0.SR.R = 0xFCFE0000;         // Clear ALL status flags by writing 1 to them
+}
+
+int main(void)
+{
+	sys_config();
+	SPI0_padconfig();
+	init_SPI0();
+
+
+	/* Loop forever */
+	while(1)
+	{
+		SPI_0.PUSHR.PUSHR.R  = 0x8001AAAA;     // Transmit data
+		read_data_SPI_0();
+	}
+}
