@@ -1,0 +1,75 @@
+#include "MPC5744P.h"
+
+
+#define 	DRUN_MODE 	0x3
+
+
+void Sys_Init(void)
+{
+	/*
+    //Clk Out
+    MC_CGM.AC6_SC.R = 0x02000000;	//Enable PLL0 - clkout0 //MC_CGM_AC6_SC
+    MC_CGM.AC6_DC0.B.DE = 1;		//Enable divider for SYSCLK0
+    MC_CGM.AC6_DC0.B.DIV = 3;		//Set divider for SYSCLK0 (div by 4)
+	*/
+    //Configure RunPeripheralConfiguration regist	ers in ME_RUN_PC0
+    MC_ME.RUN_PC[0].B.DRUN = 1;		//Enable DRUN mode for all peripherals using ME_RUN_PC[0]
+
+    MC_ME.DRUN_MC.B.XOSCON = 1;		//Enable external oscilator
+    /*
+    MC_ME.PCTL255.B.RUN_CFG = 0x0;	//enable PWM in RUN_PC_0
+    MC_ME.PCTL251.B.RUN_CFG = 0x0;	//enable ctu in RUN_PC_0
+	*/
+
+    //AUX Clock Selector 3 setup
+    MC_CGM.AC3_SC.B.SELCTL =0x01;	//connect (8..40MHz) XTALL to the PLL0 input
+    PLLDIG.PLL0DV.R = 0x50000000 |0x00020000 |0x00002000 |0x0014 ; //predefined PLL0 divider register
+    MC_ME.DRUN_MC.B.PLL0ON = 1;		//Enable PLL0 for DRUN mode
+
+    //AUX Clock Selector 0 setup
+    MC_CGM.AC0_SC.B.SELCTL=0x2;		//source PLL0 PHI 200MHz
+    MC_CGM.AC0_DC0.R = 0x80010000;	//MOTC_CLK enable with divider 1
+    MC_CGM.AC0_DC2.R = 0x80010000;	//ADC_CLK enable with divider 1
+
+
+    // Set PLL0 to 200MHz
+    //PLLDIG.PLL0CR.B.CLKCFG = 1;		//Bypass mode PLL0 on??
+    // RFDPHI1 = 10, RFDPHI = 2, PREDIV = 2, MFD = 14
+
+
+    //Mode transition to apply the PLL0 setup and set Normal mode with PLL running
+    MC_ME.MCTL.R = 0x30005AF0;		//DRUN Mode & Key
+    MC_ME.MCTL.R = 0x3000A50F;		//DRUN Mode & Key
+
+    while(!MC_ME.GS.B.S_PLL0);          //ME_GS Wait for PLL stabilization.
+    while(MC_ME.GS.B.S_MTRANS);         //Waiting for end of transaction
+    while(MC_ME.GS.B.S_CURRENT_MODE != DRUN_MODE);  // ME_GS Check DRUN mode has successfully been entered
+}//Sys_Init
+
+
+void SUIL2_Init(void)
+{
+   SIUL2.MSCR[22].R = 0x22800001;	//PB6 as CLK_OUT (on EVB it is B9)
+   /* setup ADC_0 channel AN0 as Analog Pad Control */
+   SIUL2.MSCR[23].B.APC = 0x1;		//PB7 as AN0 (on EVB it is B0)
+}//SUIL2_Init
+
+
+void ADC_Init(void)
+{
+    ADC_0.MCR.B.PWDN = 0;	// Enable ADC0 (release it from power-down mode)
+    ADC_0.MCR.B.CTUEN = 0;	// CTU mode dissbale
+    ADC_0.NCMR0.R = 0x1;	// ADC_0 channel 0 enable
+    ADC_0.MCR.B.MODE = 1;	// Scan mode - continuous conversion
+
+    ADC_0.MCR.B.NSTART = 1;	// Start normal ADC conversion on ADC_0 module AN0 channel
+}//ADC_Init
+
+
+int main (void)
+{
+  Sys_Init();
+  SUIL2_Init();
+  ADC_Init();
+  while(1);
+}//main
