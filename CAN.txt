@@ -1,0 +1,366 @@
+#include "MPC5744P.h"
+//#include "INTC_Init.h"
+
+unsigned int data;
+
+
+/* FlexCAN module register's bit masks */
+#define CAN_MCR_MDIS        0x80000000
+#define CAN_MCR_FRZ         0x40000000
+#define CAN_MCR_FEN         0x20000000
+#define CAN_MCR_HALT        0x10000000
+#define CAN_MCR_NOTRDY      0x08000000
+#define CAN_MCR_SOFTRST     0x02000000
+#define CAN_MCR_FRZACK      0x01000000
+#define CAN_MCR_WRNEN       0x00200000
+#define CAN_MCR_LPMACK      0x00100000
+#define CAN_MCR_SRXDIS      0x00020000
+#define CAN_MCR_BCC         0x00010000
+#define CAN_MCR_LPRIOEN     0x00002000
+#define CAN_MCR_AEN         0x00001000
+//extern const uint32_t IntcIsrVectorTable[];
+//extern void xcptn_xmpl(void);
+
+uint8_t   u8_txdata = 0; /* tranmitted data */
+uint8_t   u8_rxdata = 0; /* received data */
+
+void SysClk_Init(void)
+{
+    MC_CGM.AC3_SC.B.SELCTL = 0x01;		    //connect XOSC to the PLL0 input
+    MC_CGM.AC4_SC.B.SELCTL = 0x01;		    //connect XOSC to the PLL1 input
+    // Set PLL0 to 200 MHz with 40MHz XOSC reference
+    PLLDIG.PLL0DV.R = 0x3002100A;	     // PREDIV =  1, MFD = 10, RFDPHI = 2, RFDPHI1 = 6
+    MC_ME.RUN0_MC.R = 0x00130070;		    // RUN0 cfg: IRCON,OSC0ON,PLL0ON,syclk=IRC
+    // Mode Transition to enter RUN0 mode:
+    MC_ME.MCTL.R = 0x40005AF0;		    // Enter RUN0 Mode & Key
+    MC_ME.MCTL.R = 0x4000A50F;		    // Enter RUN0 Mode & Inverted Key
+    while (MC_ME.GS.B.S_MTRANS) {};		    // Wait for mode transition to complete
+    while(MC_ME.GS.B.S_CURRENT_MODE != 4) {};	    // Verify RUN0 is the current mode
+    // Set PLL1 to 160 MHz with 40MHz XOSC reference
+    PLLDIG.PLL1DV.R = 0x00020010;	     // MFD = 16, RFDPHI = 2
+    MC_ME.RUN_PC[0].R = 0x000000FE;		    // enable peripherals run in all modes
+    MC_ME.RUN0_MC.R = 0x001300F2;		    // RUN0 cfg: IRCON, OSC0ON, PLL1ON, syclk=PLL0
+    MC_CGM.SC_DC0.R = 0x80030000;    // PBRIDGE0/PBRIDGE1_CLK at syst clk div by 4 ... (50 MHz)
+    // Mode Transition to enter RUN0 mode:
+    MC_ME.MCTL.R = 0x40005AF0;		    // Enter RUN0 Mode & Key
+    MC_ME.MCTL.R = 0x4000A50F;		    // Enter RUN0 Mode & Inverted Key
+    while (MC_ME.GS.B.S_MTRANS) {};		    // Wait for mode transition to complete
+    while(MC_ME.GS.B.S_CURRENT_MODE != 4) {};	    // Verify RUN0 is the current mode
+
+    MC_CGM.AC6_SC.R = 0x04000000;    // Select PLL1 for auxiliary clock 6
+    MC_CGM.AC6_DC0.R = 0x80090000;    // CLKOUT0 : Enable aux clk 6 div by 10 *(16 MHz)
+
+
+}
+
+void SUIL2_Init(void)
+{
+   SIUL2.MSCR[22].R = 0x22800001;   	// PB6 as CLK_OUT (on EVB it is B9)
+   SIUL2.MSCR[0].R = 0x32000000; 	//PA[0] GPIO - LED1
+
+   SIUL2.MSCR[36].B.SSS = 1;                 //Config C[4] as CS0
+   SIUL2.MSCR[36].B.OBE = 1;                 //Enable output buffer
+   SIUL2.MSCR[36].B.SRC = 3;                 // Full strength slew rate
+
+   SIUL2.MSCR[37].B.SSS = 1;                //C[5] as SCK
+   SIUL2.MSCR[37].B.OBE = 1;                //Enable output buffer
+   SIUL2.MSCR[37].B.SRC = 3;                // Full strength slew rate
+
+   SIUL2.MSCR[38].B.SSS = 1;                 //C[6] as SOUT
+   SIUL2.MSCR[38].B.OBE = 1;                 //Enable output buffer
+   SIUL2.MSCR[38].B.SRC = 3;                 // Full strength slew rate
+
+   SIUL2.MSCR[39].B.IBE = 1;                //Enable input buffer of C[7]
+   SIUL2.IMCR[41].B.SSS = 1;            //C[7] as input pin SIN
+
+}//SUIL2_Init
+
+
+void PIT_Init(void)
+{
+    PIT_0.MCR.B.MDIS = 0;               //Enable PIT_0 timers
+    PIT_0.TIMER[0].LDVAL.R = 50000000-1;   // setup timer 0 for 1sec period
+    PIT_0.TIMER[0].TCTRL.B.TEN = 1;     // start Timer
+}//PIT_Init
+
+void PIT_ISR(void)
+{
+    PIT_0.TIMER[0].TCTRL.B.TEN = 1;     // stop PIT_0 Timer
+    SIUL2.GPDO[0].R = ~SIUL2.GPDO[0].R ;   ////PA[0] GPIO - LED
+    PIT_0.TIMER[0].TFLG.B.TIF = 1;     // Clear PIT_0 interrupt flag
+    PIT_0.TIMER[0].TCTRL.B.TEN = 1;     // sart PIT_0 Timer
+}//PIT_ISR
+
+void FlexCAN0_Init(void)
+{
+    uint32_t i = 0;
+
+    /* enable the FlexCAN module, reset and freeze */
+    CAN_0.MCR.R = (0
+                    | CAN_MCR_FRZ  /* enabled to enter Freeze mode */
+                    | CAN_MCR_HALT /* enter freeze mode if FRZ bit is set */
+                    //| CAN_MCR_SOFTRST /* soft reset */
+                    | CAN_MCR_SRXDIS  /* self reception enabled */
+                    | CAN_MCR_BCC  /* individual Rx masking and queue */
+                    | 0x0000003F);
+
+
+    /* wait until soft reset completes */
+    while(1 == CAN_0.MCR.B.SOFTRST) {};
+
+    /* double check that we are actually in freeze mode */
+    while(0 == CAN_0.MCR.B.FRZACK) {};
+    while(0 == CAN_0.MCR.B.NOTRDY) {};
+
+    CAN_0.MCR.R = (0
+                    | CAN_MCR_FRZ  /* enabled to enter Freeze mode */
+                    | CAN_MCR_HALT /* enter freeze mode if FRZ bit is set */
+                    /*| CAN_MCR_SRXDIS */ /* self reception enabled */
+                    | CAN_MCR_BCC  /* individual Rx masking and queue */
+                    | CAN_MCR_AEN  /* Safe Tx abort enable */
+                    | 0x0000003F); /* enable 64 MBs */
+
+
+
+    /* Configure for OSC (40 MHz), 1.0 MHz bit time */
+   // CAN_0.CTRL.R = 0x01ED0006;
+    /* Configure for OSC (40 MHz), 0.5 MHz bit time */
+    //CAN_0.CTRL.R = 0x04ED0002;
+    CAN_0.CTRL1.R = 0x04E40004;	/* CAN bus: 40 MHz clksrc, 500K bps with 16 tq */
+                              /* PRESDIV+1 = Fclksrc/Ftq = 40 MHz/8MHz = 5 */
+                              /*    so PRESDIV = 4 */
+                              /* PSEG2 = Phase_Seg2 - 1 = 5 - 1 = 4 */
+                              /* PSEG1 = PSEG2 = 4 */
+                              /* PROPSEG= Prop_Seg - 1 = 5 - 1 = 4 */
+                              /* RJW = Resync Jump Width - 1 = 4 - 1 = 1 */
+                              /* SMP = 0: use 1 bit per CAN sample */
+                              /* CLKSRC=0 (unchanged): Fcanclk= Fxtal= 40 MHz*/
+
+
+
+    /* Make first 32 message buffers inactive by writing their control fields
+     * to "not active". They will be left
+     * inactive until we're ready for communication. */
+    for(i=0;i<64;i++)
+    {
+        CAN_0.MB[i].CS.R = 0;
+    }
+
+    /* set mask registers - all ID bits must match */
+    for(i=0;i<64;i++)
+    {
+        CAN_0.RXIMR[i].R = 0x1FFFFFFF;
+    }
+
+    /* configure CAN0TX and CAN0RX pin functions */
+    SIUL2.MSCR[16].B.SSS = 1;    /* Pad PB0: Source signal is CAN0_TX  */
+    SIUL2.MSCR[16].B.OBE = 1;    /* Pad PB0: Output Buffer Enable */
+    SIUL2.MSCR[16].B.SRC = 3;    /* Pad PB0: Maximum slew rate */
+    SIUL2.MSCR[17].B.IBE = 1;    /* Pad PB1: Enable pad for input - CAN0_RX */
+    SIUL2.IMCR[32].B.SSS = 2;   /* CAN0_RX: connected to pad PB1 */
+
+
+    /* Finally clear the HALT flag in MCR to enable the FlexCAN
+     * to synchronize with the CAN bus and allow
+     * participation in communication. */
+    CAN_0.MCR.B.HALT = 0;
+
+    /* wait until FlexCAN ready */
+    while(1 == CAN_0.MCR.B.FRZACK) {}
+    while(1 == CAN_0.MCR.B.NOTRDY) {}
+}
+
+/*******************************************************************************
+Function Name : FlexCAN1_Init
+Engineer      : PetrS
+Date          : Mar-17-2015
+Parameters    : NONE
+Modifies      : NONE
+Returns       : NONE
+Notes         : FlexCAN1 initialization
+Issues        : NONE
+*******************************************************************************/
+void FlexCAN1_Init(void)
+{
+    uint32_t i = 0;
+
+    /* enable the FlexCAN module, reset and freeze */
+    CAN_1.MCR.R = (0
+                    | CAN_MCR_FRZ  /* enabled to enter Freeze mode */
+                    | CAN_MCR_HALT /* enter freeze mode if FRZ bit is set */
+                    //| CAN_MCR_SOFTRST /* soft reset */
+                    | CAN_MCR_SRXDIS  /* self reception enabled */
+                    | CAN_MCR_BCC  /* individual Rx masking and queue */
+                    | 0x0000003F);
+
+
+    /* wait until soft reset completes */
+    while(1 == CAN_1.MCR.B.SOFTRST) {};
+
+    /* double check that we are actually in freeze mode */
+    while(0 == CAN_1.MCR.B.FRZACK) {};
+    while(0 == CAN_1.MCR.B.NOTRDY) {};
+
+    CAN_1.MCR.R = (0
+                    | CAN_MCR_FRZ  /* enabled to enter Freeze mode */
+                    | CAN_MCR_HALT /* enter freeze mode if FRZ bit is set */
+                    /*| CAN_MCR_SRXDIS */ /* self reception enabled */
+                    | CAN_MCR_BCC  /* individual Rx masking and queue */
+                    | CAN_MCR_AEN  /* Safe Tx abort enable */
+                    | 0x0000003F); /* enable 64 MBs */
+
+
+
+    /* Configure for OSC (40 MHz), 1.0 MHz bit time */
+   // CAN_0.CTRL.R = 0x01ED0006;
+    /* Configure for OSC (40 MHz), 0.5 MHz bit time */
+    //CAN_0.CTRL.R = 0x04ED0002;
+    CAN_1.CTRL1.R = 0x04E40004;	/* CAN bus: 40 MHz clksrc, 500K bps with 16 tq */
+                              /* PRESDIV+1 = Fclksrc/Ftq = 40 MHz/8MHz = 5 */
+                              /*    so PRESDIV = 4 */
+                              /* PSEG2 = Phase_Seg2 - 1 = 5 - 1 = 4 */
+                              /* PSEG1 = PSEG2 = 4 */
+                              /* PROPSEG= Prop_Seg - 1 = 5 - 1 = 4 */
+                              /* RJW = Resync Jump Width - 1 = 4 - 1 = 1 */
+                              /* SMP = 0: use 1 bit per CAN sample */
+                              /* CLKSRC=0 (unchanged): Fcanclk= Fxtal= 40 MHz*/
+
+
+
+    /* Make first 32 message buffers inactive by writing their control fields
+     * to "not active". They will be left
+     * inactive until we're ready for communication. */
+    for(i=0;i<64;i++)
+    {
+        CAN_1.MB[i].CS.R = 0;
+    }
+
+    /* set mask registers - all ID bits must match */
+    for(i=0;i<64;i++)
+    {
+        CAN_1.RXIMR[i].R = 0x1FFFFFFF;
+    }
+
+    /* configure CAN1TX and CAN1RX pin functions */
+    SIUL2.MSCR[14].B.SSS = 1;    /* Pad PA14: Source signal is CAN0_TX  */
+    SIUL2.MSCR[14].B.OBE = 1;    /* Pad PA14: Output Buffer Enable */
+    SIUL2.MSCR[14].B.SRC = 3;    /* Pad PA14: Maximum slew rate */
+    SIUL2.MSCR[15].B.IBE = 1;    /* Pad PA15: Enable pad for input - CAN0_RX */
+    SIUL2.IMCR[33].B.SSS = 1;   /* CAN1_RX: connected to pad PA15 */
+
+
+    /* Finally clear the HALT flag in MCR to enable the FlexCAN
+     * to synchronize with the CAN bus and allow
+     * participation in communication. */
+    CAN_1.MCR.B.HALT = 0;
+
+    /* wait until FlexCAN ready */
+    while(1 == CAN_1.MCR.B.FRZACK) {}
+    while(1 == CAN_1.MCR.B.NOTRDY) {}
+}
+
+static void TransmitMsg(void)
+{
+  /* Assumption:  Message buffer CODE is INACTIVE */
+  /* prepare data to send */
+  /* prepare data to send */
+  u8_txdata ^= 0x01; /* toggle bit 0 */
+
+  /* CAN_A MB8 Tx Send Once, data length to send = 1 byte */
+  CAN_0.MB[8].CS.R = 0x08600000; /* Tx INACTIVE + IDE + SRR */
+  CAN_0.MB[8].ID.R = 0x12340000; /* Ext.ID = 0x12340000 */
+  CAN_0.MB[8].DATA.B[0] = u8_txdata; /* data to send */
+  CAN_0.MB[8].CS.R = 0x0C610000; /* send 1 byte, ext.frame */
+
+  while ( (CAN_0.IFLAG1.B.BUF31TO8I & 1) == 0) { } // wait until the tx is completed.
+  CAN_0.IFLAG1.R = 0x00000100;
+}
+
+static void ReceiveMsg(void)
+{
+  uint32_t temp = 0;      /* temporary and volatile 32bit */
+
+	/* upon receiving the interrupt flag */
+
+    /* mandatory - read control/status word - lock the MB */
+	temp = CAN_1.MB[9].CS.R;
+	/* check the ID field */
+	/* not really needed in this example */
+	/* useful in case when multiple IDs are received
+	 * by one message buffer (Rx mask feature) */
+	temp = CAN_1.MB[9].ID.R;
+	if(0x12340000 != temp)
+	{
+	    /* error ! trap here.
+	     * we have configured this MB to receive
+	     * just ID 0x12340000 and not another */
+	    while(1) {}
+	}
+
+	/* read the received data */
+	u8_rxdata = CAN_1.MB[9].DATA.B[0];
+
+	/* release the internal lock for all Rx MBs
+	 * by reading the TIMER */
+	temp = CAN_1.TIMER.R;
+
+	/* do someting with the received data */
+    /* drive the output pin with the received data */
+    SIUL2.GPDO[0].R = u8_rxdata;
+}
+
+void init_SPI0()
+{
+	SPI_0.MCR.R = 0x80010001;		//master mode, halt
+	SPI_0.MODE.CTAR[0].R = 0x7A5A1120; //config baud rate
+	//DBR=0,FMSZ=1111,CPOL=0,CPHA=1,LSBFE=0,PCSSCK=01,PASC=01,PDT=10,PBR=10
+	//CSSCK=0001,ASC=0001,DT=0010,BR=0000
+	SPI_0.MCR.B.HALT = 0x0; //start spi0
+}
+
+void read_data_SPI_0(void)
+{
+  while (SPI_0.SR.B.RFDF != 1){}   //Wait for Receive FIFO Drain Flag = 1
+  data =SPI_0.POPR.R;              //Read  received data
+  SPI_0.SR.R = 0xFCFE0000;         // Clear ALL status flags by writing 1 to them
+}
+
+void main (void)
+{
+    SysClk_Init();
+    //INTC_Init();
+    SUIL2_Init();
+    PIT_Init();
+    FlexCAN0_Init();
+    FlexCAN1_Init();
+    init_SPI0();
+
+    SPI_0.PUSHR.PUSHR.R  = 0x08018C00;     // Transmit data,read mode from MC33907
+    while(SPI_0.SR.B.TCF!=1); //wait for transfer complete
+    read_data_SPI_0();
+
+    /* subscribe FlexCAN_B's MB9 for Rx - extended frame format */
+    //CAN_1.MB[9].CS.R = 0x00200000; /* Rx inactive + IDE */
+    CAN_1.MB[9].ID.R = 0x12340000; /* Ext.ID = 0x12340000 */
+    CAN_1.MB[9].CS.R = 0x04200000; /* Rx active and empty + IDE */
+
+    while(1)
+    {
+	if(PIT_0.TIMER[0].TFLG.B.TIF)
+    	{
+	    TransmitMsg();	/* Transmit one message from a FlexCAN 0 buffer */
+	    /* if nothing connected to the bus, message is transmitting repeatedly
+	       (not acknownledged) and a MCU is going to the error passive mode */
+
+	    PIT_0.TIMER[0].TFLG.B.TIF = 1;     // Clear PIT_0 interrupt flag
+  	}
+	if(CAN_1.IFLAG1.B.BUF31TO8I & 0x2) 	// test BUF9I flag if set
+        {
+	    ReceiveMsg();
+
+	    /* clear the BUF09I bit - bit 9 */
+	    CAN_1.IFLAG1.R = 0x00000200;
+
+         }
+    }
+}//main
