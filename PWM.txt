@@ -1,0 +1,91 @@
+#include "MPC5744P.h"
+
+
+void SysClk_Init(void)
+{
+    MC_CGM.AC3_SC.B.SELCTL = 0x01;		    //connect XOSC to the PLL0 input
+    MC_CGM.AC4_SC.B.SELCTL = 0x01;		    //connect XOSC to the PLL1 input
+
+    // Set PLL0 to 160 MHz with 40MHz XOSC reference
+    PLLDIG.PLL0DV.R = 0x28021008;     // PREDIV =  1, MFD = 8, RFDPHI = 2, RFDPHI1 = 5
+    MC_ME.RUN0_MC.R = 0x00130070;     // RUN0 cfg: IRCON,OSC0ON,PLL0ON,syclk=IRC
+
+    // Mode Transition to enter RUN0 mode:
+    MC_ME.MCTL.R = 0x40005AF0;	      // Enter RUN0 Mode & Key
+    MC_ME.MCTL.R = 0x4000A50F;	      // Enter RUN0 Mode & Inverted Key
+    while (MC_ME.GS.B.S_MTRANS) {};   // Wait for mode transition to complete
+    while(MC_ME.GS.B.S_CURRENT_MODE != 4) {};	    // Verify RUN0 is the current mode
+
+    // Set PLL1 to 200 MHz with 40MHz XOSC reference
+    PLLDIG.PLL1DV.R = 0x00020014;     // MFD = 20, RFDPHI = 2
+    MC_ME.RUN_PC[0].R = 0x000000FE;   // enable peripherals run in all modes
+    MC_ME.RUN0_MC.R = 0x001300F4;     // RUN0 cfg: IRCON, OSC0ON, PLL1ON, syclk=PLL1
+    MC_CGM.SC_DC0.R = 0x80030000;     // PBRIDGE0/PBRIDGE1_CLK at syst clk div by 4 ... (50 MHz)
+
+    // Mode Transition to enter RUN0 mode:
+    MC_ME.MCTL.R = 0x40005AF0;	      // Enter RUN0 Mode & Key
+    MC_ME.MCTL.R = 0x4000A50F;	      // Enter RUN0 Mode & Inverted Key
+    while (MC_ME.GS.B.S_MTRANS) {};   // Wait for mode transition to complete
+    while(MC_ME.GS.B.S_CURRENT_MODE != 4) {};	    // Verify RUN0 is the current mode
+
+    MC_CGM.AC0_SC.R = 0x02000000;     // Select PLL0 for auxiliary clock 0
+    MC_CGM.AC0_DC0.R = 0x80000000;    // MOTC_CLK : Enable aux clk 0 div by 1 ?(160 MHz)
+    MC_CGM.AC0_DC2.R = 0x80010000;    // ADC_CLK : Enable aux clk 0 div by 2 ?(80 MHz)
+
+    MC_CGM.AC6_SC.R = 0x02000000;     // Select PLL0 for auxiliary clock 6
+    MC_CGM.AC6_DC0.R = 0x80090000;    // CLKOUT0 : Enable aux clk 6 div by 10 ?(16 MHz)
+
+}
+
+
+void SUIL2_Init(void)
+{
+    SIUL2.MSCR[39].R = 0x02800002; // C[7] pin as FlexPWM A[1] output
+    SIUL2.MSCR[38].R = 0x02800002; // C[6] pin as FlexPWM B[1] output
+    SIUL2.MSCR[36].R = 0x02800002; // C[4] pin as FlexPWM X[1] output
+}
+
+/
+static void FlexPWM_Init(void)
+{
+
+    FlexPWM_0.OUTEN.R           = 0x222;	// enable A B X outputs on submodule 1
+    /* Submodule 1 Initialisation */
+    FlexPWM_0.SUB[1].CTRL1.R     = 0x0404;	// full cycle reload, every opportunity,IPBus/1, LDMOD=1
+    FlexPWM_0.SUB[1].CTRL2.R    = 0x2080;	// debug and force enable
+    FlexPWM_0.SUB[1].INIT.R   = 0;
+    FlexPWM_0.SUB[1].VAL0.R   = 600;		//PWM X1 rising edge
+    FlexPWM_0.SUB[1].VAL1.R   = 1250;		// PWM modulo & PWM X1 falling edge
+    FlexPWM_0.SUB[1].VAL2.R   = 500; 	  	// PWM A1 rising edge
+    FlexPWM_0.SUB[1].VAL3.R   = 1250;		// PWM A1 falling edge
+    FlexPWM_0.SUB[1].VAL4.R = 300;			// PWM B1 rising edge
+    FlexPWM_0.SUB[1].VAL5.R = 1200;			// PWM B1 falling edge
+    FlexPWM_0.SUB[1].DTCNT0.R   = 0;		// deadtime values
+    FlexPWM_0.SUB[1].DTCNT1.R   = 0;
+    FlexPWM_0.SUB[1].DISMAP.R   = 0x0000;	// disable fault pin condition
+
+    // store INIT values
+    FlexPWM_0.SUB[1].INIT.R   = 0;
+
+    // do immediate update, LDMOD bit already set
+    FlexPWM_0.MCTRL.B.LDOK = 2;                // Load OK for each submodules
+    while (FlexPWM_0.MCTRL.B.LDOK == 2 );
+
+	// disable immediate update
+    FlexPWM_0.SUB[1].CTRL1.B.LDMOD = 0;
+
+    FlexPWM_0.MCTRL.R = 0x0200;		// Submodule 1 PWM generator enabled
+
+}
+
+void main (void)
+{
+    SysClk_Init();
+    SUIL2_Init();
+    FlexPWM_Init();
+
+    while(1)
+    {
+
+    }
+}//main
